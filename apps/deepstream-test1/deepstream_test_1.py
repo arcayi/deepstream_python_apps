@@ -28,6 +28,9 @@ from common.bus_call import bus_call
 
 import pyds
 
+from common.FPS import PERF_DATA
+perf_data = None
+
 PGIE_CLASS_ID_VEHICLE = 0
 PGIE_CLASS_ID_BICYCLE = 1
 PGIE_CLASS_ID_PERSON = 2
@@ -77,10 +80,16 @@ def osd_sink_pad_buffer_probe(pad,info,u_data):
                 break
             obj_counter[obj_meta.class_id] += 1
             obj_meta.rect_params.border_color.set(0.0, 0.0, 1.0, 0.8) #0.8 is alpha (opacity)
+                        
             try: 
                 l_obj=l_obj.next
             except StopIteration:
                 break
+
+        # Update frame rate through this probe
+        stream_index = "stream{0}".format(frame_meta.pad_index)
+        global perf_data
+        perf_data.update_fps(stream_index)
 
         # Acquiring a display meta object. The memory ownership remains in
         # the C code so downstream plugins can still access it. Otherwise
@@ -93,7 +102,7 @@ def osd_sink_pad_buffer_probe(pad,info,u_data):
         # memory will not be claimed by the garbage collector.
         # Reading the display_text field here will return the C address of the
         # allocated string. Use pyds.get_string() to get the string content.
-        py_nvosd_text_params.display_text = "Frame Number={} Number of Objects={} Vehicle_count={} Person_count={}".format(frame_number, num_rects, obj_counter[PGIE_CLASS_ID_VEHICLE], obj_counter[PGIE_CLASS_ID_PERSON])
+        py_nvosd_text_params.display_text = "fps={} Frame Number={} Number of Objects={} Vehicle_count={} Person_count={}".format(perf_data.all_stream_fps[stream_index].get_fps(), frame_number, num_rects, obj_counter[PGIE_CLASS_ID_VEHICLE], obj_counter[PGIE_CLASS_ID_PERSON])
 
         # Now set the offsets where the string should appear
         py_nvosd_text_params.x_offset = 10
@@ -112,6 +121,7 @@ def osd_sink_pad_buffer_probe(pad,info,u_data):
         # Using pyds.get_string() to get display_text as string
         print(pyds.get_string(py_nvosd_text_params.display_text))
         pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
+
         try:
             l_frame=l_frame.next
         except StopIteration:
@@ -125,6 +135,9 @@ def main(args):
     if len(args) != 2:
         sys.stderr.write("usage: %s <media file or uri>\n" % args[0])
         sys.exit(1)
+
+    global perf_data
+    perf_data = PERF_DATA(1)
 
     # Standard GStreamer initialization
     Gst.init(None)
@@ -255,5 +268,29 @@ def main(args):
     pipeline.set_state(Gst.State.NULL)
 
 if __name__ == '__main__':
-    sys.exit(main(sys.argv))
+    # sys.exit(main(sys.argv))
 
+    n_workers = 8
+    import logging
+    import time
+    from concurrent import futures
+
+    logging.basicConfig(
+        format="[%(process)d,%(thread)x,%(name)s]%(asctime)s -%(levelname)s- %(message)s",
+        level=logging.INFO,
+    )
+    logging.info("multiprocessing.pool.Pool:\n")
+    start = time.time()
+
+    with futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+        future_to_num = {executor.submit(main, **{"args": sys.argv}): num for num in range(n_workers)}
+        for future in futures.as_completed(future_to_num):
+            num = future_to_num[future]
+            try:
+                data = future.result()
+            except Exception as e:
+                logging.exception("%r generated an exception: %s" % (num, e))
+            else:
+                logging.info(f"{num}`s result is {data}")
+
+    logging.info(f"COST: {time.time() - start}")
